@@ -249,6 +249,17 @@
     }
     #statusOverlay h2 { color: #3b82f6; font-size: 2.8rem; margin-bottom: 0.8rem; }
     #statusOverlay p { font-size: 1.6rem; }
+
+    /* ?noUi: hide every pre-playback/status chrome for a clean blank screen.
+       The pairing code (#pairingSection) is deliberately NOT in this list — a
+       screen that has never been set up cannot be claimed without it. */
+    body.no-ui #setupScreen { background: #000; }
+    body.no-ui #setupScreen h1,
+    body.no-ui #setupScreen .subtitle,
+    body.no-ui #setupScreen #urlForm,
+    body.no-ui #setupScreen #setupSpinner,
+    body.no-ui #setupScreen #setupStatus { display: none !important; }
+    body.no-ui #statusOverlay { display: none !important; }
   </style>
 </head>
 <body>
@@ -392,6 +403,21 @@
     // #104: device-free dashboard preview mode (set by the ?preview=1 boot branch).
     // Gates the webpage-widget honest note and keeps the pairing/socket path off.
     let PREVIEW_MODE = false;
+
+    // ?noUi: hide pre-playback/status UI for a clean blank screen (e.g. embedded
+    // behind other content). "Waiting for content" becomes blank black, the tap-to-start
+    // overlay is skipped (connects muted, as after its 5s auto-dismiss). The initial
+    // pairing code is still shown — without it the screen could never be set up.
+    // Presence-based (any value, including bare ?noUi); key match is case-insensitive
+    // so ?noui/?NOUI do not silently do nothing.
+    const NO_UI = (() => {
+      try {
+        const qs = new URLSearchParams(location.search);
+        for (const k of qs.keys()) { if (k.toLowerCase() === 'noui') return true; }
+        return false;
+      } catch (e) { return false; }
+    })();
+    try { if (NO_UI) document.body.classList.add('no-ui'); } catch (e) {}
 
     // Restarting the player — the only way any call site should do it.
     //
@@ -1716,7 +1742,13 @@
       // per-document — a localStorage flag from a prior session does not grant
       // audio autoplay to a fresh page. The overlay auto-dismisses after 5s and
       // connects muted, so unattended kiosks still recover without a human tap.
-      {
+      // ?noUi skips it entirely and takes the auto-dismiss path immediately.
+      // Deferred via setTimeout: a synchronous connect() here would run before the
+      // rest of this script has evaluated, hitting TDZ on later `let` state and
+      // crashing the player (offline/crashed in the dashboard, frozen content).
+      if (NO_UI) {
+        setTimeout(() => connect(config.serverUrl), 0);
+      } else {
         const tapOverlay = document.createElement('div');
         tapOverlay.style.cssText = 'position:fixed;inset:0;background:#111827;z-index:2000;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer';
         tapOverlay.innerHTML = `
@@ -4190,6 +4222,8 @@
         isPlaying = false;
         playlist = [];
         document.getElementById('playerContainer').style.display = 'none';
+        // ?noUi stays a blank screen even here — only the pairing code is exempt.
+        if (NO_UI) { try { document.getElementById('statusOverlay').style.display = 'none'; } catch (e) {} return; }
         const overlay = document.getElementById('statusOverlay');
         overlay.style.display = 'flex';
         overlay.innerHTML = `
@@ -4946,7 +4980,14 @@
     }
 
     function teardownCurrentMedia(keep) {
-      // On a buffered widget reveal (keep set) the widget's advance/refresh timer was just
+      // Invalidate any in-flight async (buffered) render. renderContent bumps renderSeq on
+      // dispatch, but teardown is the same "what's on screen is going away" statement from
+      // every OTHER path — and without this a warm-play/first-frame wait that completes
+      // AFTER a playlist clear sees a current sequence number and mounts the stale item over
+      // the blank screen. Reached without any coincidence: on a fast link the socket's empty
+      // update lands while the boot render is still warming up (its element is detached, so
+      // the DOM cleanup below cannot touch it), and mountVideo then appends + plays it.
+      renderSeq++;      // On a buffered widget reveal (keep set) the widget's advance/refresh timer was just
       // armed by renderContent and must survive; only a real teardown cancels it.
       if (!keep && advanceTimer) { clearTimeout(advanceTimer); advanceTimer = null; }
       // #215: a stale YouTube safety-net timer must never fire into a torn-down/rotated
@@ -6215,6 +6256,12 @@
 
     // ==================== UI Helpers ====================
     function showStatus(msg) {
+      // ?noUi: every status ("Waiting for content...", "Connecting...",
+      // "Nothing scheduled...") becomes a blank screen instead.
+      if (typeof NO_UI !== 'undefined' && NO_UI) {
+        try { document.getElementById('statusOverlay').style.display = 'none'; } catch (e) {}
+        return;
+      }
       const overlay = document.getElementById('statusOverlay');
       if (!overlay) return;
       overlay.style.display = 'flex';
